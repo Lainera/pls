@@ -1,0 +1,46 @@
+---
+- name: Switch to cgroupsv2
+  hosts: all
+  handlers:
+    - name: update-grub
+      become: true
+      shell:
+        cmd: update-grub
+      notify: reboot
+
+    - name: reboot
+      become: true
+      reboot:
+        reboot_timeout: 120
+
+  tasks:
+    - name: Fetch cgroup fstype
+      shell:
+        cmd: stat -c '%T' -f /sys/fs/cgroup
+      register: cgroupFstype
+
+    - name: Inform about decision 
+      debug: 
+        msg: >
+          Current cgroup is {{ cgroupFstype.stdout }}.
+          {{ 'Skipping play' if cgroupFstype.stdout == 'cgroup2fs' else 'Executing play' }}
+
+    - name: Abort when already cgroupsv2
+      when: cgroupFstype.stdout == 'cgroup2fs'
+      meta: end_host
+
+    - name: Fetch current kernel params
+      register: kParams
+      shell: 
+        cmd: >
+          grep -E 'GRUB_CMDLINE_LINUX="' /etc/default/grub
+          | sed -E 's/GRUB_CMDLINE_LINUX=\"(.*)\"/\1/g'
+
+    - name: Disable cgroupsv1
+      become: true
+      when: not "cgroup_no_v1" in kParams.stdout
+      notify: update-grub
+      lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX="(.*)"$'
+        line: GRUB_CMDLINE_LINUX="{{ kParams.stdout + ' cgroup_no_v1=all' if (kParams.stdout | length ) > 0 else 'cgroup_no_v1=all' }}" 

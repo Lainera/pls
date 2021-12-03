@@ -1,0 +1,5 @@
+*/**/.vagrant
+Notes.md
+/ubuntu/*/**
+
+!/ubuntu/Vagrantfile

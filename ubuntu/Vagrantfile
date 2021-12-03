@@ -1,0 +1,16 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/focal64"
+  
+  config.vm.define "cgroup_ubuntu"
+  config.vm.provider "virtualbox" do |v|
+    v.name = "cgroup_ubuntu"
+    v.memory = 1024
+  end
+
+  config.vm.provision "ansible" do |p|
+    p.playbook = "../playbook.yml"
+  end
+
+end

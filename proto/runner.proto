@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package runner;
+
+service JobRunner {
+  rpc Start(JobRequest) returns (JobId);
+  rpc Stop(JobId) returns (Ack);
+  rpc Status(JobId) returns (JobStatus);
+  rpc Output(JobId) returns (stream LogMessage);
+}
+
+message JobRequest {
+  message CpuControl { uint32 cpu_weight = 1; }
+
+  message MemControl {
+    uint64 mem_high = 1;
+    uint64 mem_max = 2;
+  }
+
+  message IoControl {
+    uint64 rbps_max = 1;
+    uint64 wbps_max = 2;
+  }
+
+  string executable = 1;
+  optional CpuControl cpu_control = 2;
+  optional MemControl mem_control = 3;
+  optional IoControl io_control = 4;
+  repeated string args = 5;
+}
+
+message Ack {}
+
+message JobId { bytes jobid = 1; }
+
+message JobStatus {
+  oneof outcome {
+    int32 exit_code = 1;
+    int32 signal = 2;
+  }
+}
+
+message LogMessage {
+  enum Fd {
+    out = 0;
+    err = 1;
+  }
+  Fd fd = 1;
+  bytes output = 2;
+}
