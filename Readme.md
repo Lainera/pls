@@ -36,9 +36,68 @@ For this implementation such flexibility is a no-goal, instead authentication is
 
 Authorization is done via job ownership scheme, leveraging `O`rganization value read from the subject field of the end-entity certificate provided by caller.
 
-System uses TLS v1.2 cipher suite:
-- 2048 RSA keys, since it is current industry standard (and some cloud providers do not support 4096 keys yet).
-- sha256 for message authentication 
+System uses TLS v1.3 and EEC. 
+
+Keys are generated with `openssl genpkey -algorithm ed25519`. Curve is [used in the wild](https://en.wikipedia.org/wiki/EdDSA#Software) and considered safe by [safecurves](https://safecurves.cr.yp.to). 
+
+Certificates are generated with:
+
+```sh
+# CA
+openssl genpkey -algorithm ed25519 > ca/key
+openssl req -new -x509 -key ca/key -out ca/cert -config $CONF
+# Server 
+openssl genpkey -algorithm ed25519 > server/key
+openssl req -new -key server/key -out server/csr -config $CONF
+openssl x509 -req -in server/csr -extfile $CONF -extensions server_ext -out server/cert -CA ca/cert -CAkey ca/key 
+# Client
+openssl genpkey -algorithm ed25519 > client/key
+openssl req -new -key server/key -out client/csr -config $CONF
+openssl x509 -req -in server/csr -extfile $CONF -extensions client_ext -out client/cert -CA ca/cert -CAkey ca/key 
+```
+
+<details>
+<summary> Click to view openssl config </summary>
+
+```sh 
+[ req ]
+default_bits        = 4096
+default_md          = sha512
+distinguished_name  = req_distinguished_name
+
+[ req_distinguished_name ]
+countryName                     = Country Name (2 letter code)
+stateOrProvinceName             = State or Province Name
+localityName                    = Locality Name
+0.organizationName              = Organization Name
+organizationalUnitName          = Organizational Unit Name
+commonName                      = Common Name
+emailAddress                    = Email Address
+countryName_default = CA 
+stateOrProvinceName_default = BC 
+localityName_default = Vancouver
+
+[ client_ext ]
+basicConstraints        = CA:FALSE
+subjectKeyIdentifier    = hash
+authorityKeyIdentifier  = keyid, issuer
+keyUsage                = critical, nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage        = clientAuth, emailProtection
+
+[ server_ext ]
+basicConstraints        = CA:FALSE
+subjectKeyIdentifier    = hash
+authorityKeyIdentifier  = keyid, issuer:always
+keyUsage                = critical, digitalSignature, keyEncipherment
+extendedKeyUsage        = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = localhost
+DNS.2 = 127.0.0.1
+DNS.3 = ::1
+```
+</details>
 
 Application leverages [rustls](https://github.com/rustls/rustls) for crypto needs, which had been [audited by Cure53](https://github.com/rustls/rustls/blob/master/audit/TLS-01-report.pdf) on behalf of CNCF in 2020. 
 
