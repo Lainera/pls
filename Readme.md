@@ -28,6 +28,10 @@ Adding process to a cgroup requires eid of the process performing the move to be
 This could be achieved by setting up appropriate permissions beforehand as privileged user and executing binary as U.
 For this implementation it is a no-goal and process is ran as root. 
 
+### Flow
+
+`start` request is forwarded to controller, which creates child cgroup for that particular job. After child process is `fork`'ed but before `exec`'ed, child process runs [`pre_exec` closures](https://docs.rs/tokio/1.14.0/tokio/process/struct.Command.html#method.pre_exec). Child process adds its `pid` to cgroup created for this particular job by calling `getpid` and writing result to `cgroup.procs`. This call is followed by `setgid` and `setuid` to ensure job does not run as privileged user. 
+
 ## Authn/z
 
 Authentication is implemented with mTLS. In a production scenario job-runner service provider would leverage their own CA, to generate chain of trust. Each client (in the business sense, as an organization) could be issued intermediate CA, which in return would be used to issue end entity certificates. 
@@ -142,6 +146,7 @@ message JobRequest {
 
 message Ack {}
 
+// jobid is byte representation of uuid 
 message JobId { bytes jobid = 1; }
 
 message JobStatus {
@@ -270,7 +275,8 @@ end
 [![](https://mermaid.ink/img/eyJjb2RlIjoic2VxdWVuY2VEaWFncmFtXG5hY3RvciBDQSBhcyBDbGllbnQgQVxucGFydGljaXBhbnQgUyBhcyBKb2IgUnVubmVyIFNlcnZpY2UgXG5wYXJ0aWNpcGFudCBDUkEgYXMgQ29udHJvbGxlciBmb3IgQ2xpZW50IEFcbnBhcnRpY2lwYW50IEogYXMgSm9iXG5wYXJ0aWNpcGFudCBGUyBhcyBGaWxlIFN5c3RlbVxuXG5Ob3RlIG92ZXIgQ0EsRlM6IEpvYiB3aXRoIGlkIEpvYklkIGZvciBDbGllbnQgQSB3YXMgc3RhcnRlZCBlYXJsaWVyXG5KLSlGUzogU3RyZWFtcyBsb2dzXG5DQS0-PlM6IE91dHB1dChKb2JJZClcblMtPj5DUkE6IE91dHB1dCBmb3IgSm9iSWQgcGxzXG5DUkEtPj5GUzogT3BlbiBMb2cgZmlsZXMgZm9yIEpvYklkXG5GUy0-PkNSQTogSGVyZSBpcyB0aGUgaGFuZGxlXG5DUkEtPj5TOiBTdHJlYW0gY29udGVudHMgYmFja1xuUy0-PkNBOiBIZXJlIGFyZSB5b3VyIGxvZ3MiLCJtZXJtYWlkIjp7InRoZW1lIjoiZGVmYXVsdCJ9LCJ1cGRhdGVFZGl0b3IiOmZhbHNlLCJhdXRvU3luYyI6dHJ1ZSwidXBkYXRlRGlhZ3JhbSI6ZmFsc2V9)](https://mermaid.live/edit#eyJjb2RlIjoic2VxdWVuY2VEaWFncmFtXG5hY3RvciBDQSBhcyBDbGllbnQgQVxucGFydGljaXBhbnQgUyBhcyBKb2IgUnVubmVyIFNlcnZpY2UgXG5wYXJ0aWNpcGFudCBDUkEgYXMgQ29udHJvbGxlciBmb3IgQ2xpZW50IEFcbnBhcnRpY2lwYW50IEogYXMgSm9iXG5wYXJ0aWNpcGFudCBGUyBhcyBGaWxlIFN5c3RlbVxuXG5Ob3RlIG92ZXIgQ0EsRlM6IEpvYiB3aXRoIGlkIEpvYklkIGZvciBDbGllbnQgQSB3YXMgc3RhcnRlZCBlYXJsaWVyXG5KLSlGUzogU3RyZWFtcyBsb2dzXG5DQS0-PlM6IE91dHB1dChKb2JJZClcblMtPj5DUkE6IE91dHB1dCBmb3IgSm9iSWQgcGxzXG5DUkEtPj5GUzogT3BlbiBMb2cgZmlsZXMgZm9yIEpvYklkXG5GUy0-PkNSQTogSGVyZSBpcyB0aGUgaGFuZGxlXG5DUkEtPj5TOiBTdHJlYW0gY29udGVudHMgYmFja1xuUy0-PkNBOiBIZXJlIGFyZSB5b3VyIGxvZ3MiLCJtZXJtYWlkIjoie1xuICBcInRoZW1lXCI6IFwiZGVmYXVsdFwiXG59IiwidXBkYXRlRWRpdG9yIjpmYWxzZSwiYXV0b1N5bmMiOnRydWUsInVwZGF0ZURpYWdyYW0iOmZhbHNlfQ)
 
 Notes:
-- Considered keeping logs in-memory, but I believe this approach has couple of drawbacks. Reads and writes need to be synchronized somehow, so our options are either introducing Mutex, which may become fairly hot (depends on the volume of logs), or making Job own the output of the child process instead of streaming to file. This consequently means that all job output is now in main process memory, regardless of whether it will ever be read or not.  
+- Considered keeping logs in-memory, but I believe this approach has couple of drawbacks. Reads and writes need to be synchronized somehow, so our options are either introducing Mutex, which may become fairly hot (depends on the volume of logs), or making Job own the output of the child process instead of streaming to file. This consequently means that all job output is now in main process memory, regardless of whether it will ever be read or not. 
+- Assuming job is still running, only logs that were generated at the moment of request would be sent back. To address that, controller could leverage [inotify](https://man7.org/linux/man-pages/man7/inotify.7.html) (intention is to use [inotify-rs](https://docs.rs/inotify/latest/inotify/)). Given log streamer task read EOF from open file, instead of exiting it `select!`'s on one of two events - either job done, in which case no new logs were generated or `IN_MODIFY` event, in which case file is opened again, `seek`'ed to wherever cursor was left and streaming to client resumes. 
 
 <details>
 <summary> Job output mermaid </summary>
