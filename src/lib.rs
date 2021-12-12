@@ -1,8 +1,15 @@
 #![allow(dead_code)]
 
+tonic::include_proto!("runner");
+
 use thiserror::Error;
 pub mod controller;
 pub mod stack_string;
+pub mod job;
+
+pub mod cgroup {
+    pub const PROC_FILE: &str = "cgroup.procs";
+}
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod stub;
@@ -11,8 +18,6 @@ pub(crate) mod stub;
 pub enum PlsError {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
-    #[error(transparent)]
-    STString(#[from] stack_string::Error),
     #[error(transparent)]
     CTError(#[from] controller::Error),
 }
