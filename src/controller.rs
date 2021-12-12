@@ -1,25 +1,31 @@
 use log::error;
-
-use nix::{unistd::getpid, libc::getpwnam};
+use thiserror::Error;
+use nix::unistd::getpid;
 
 #[cfg(target_os = "linux")]
-use nix::libc::{setgid, setuid};
+use nix::libc::{setgid, setuid, getpwnam};
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) mod stub {
-    pub fn setgid(_: i32) -> i32 { 0 }
-    pub fn setuid(_: i32) -> i32 { 0 }
+#[cfg(target_os = "linux")]
+// Synchronously adds user during setup phase to avoid
+// dealing with boxing of recursive future
+fn useradd(client: &'c str) -> Result<(), Error> {
+    let args = vec!["-s", "/sbin/nologin", "-U", client];
+    std::process::Command::new("useradd")
+        .args(&args)
+        .status()?;
+    
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-use stub::{setuid, setgid};
+use crate::stub::{setuid, setgid, getpwnam, useradd};
 
 use std::{
     collections::HashMap,
     os::unix::process::ExitStatusExt,
     path::Path,
     process::Stdio,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock}, ffi::{CString, NulError},
 };
 
 use tokio::{
@@ -33,6 +39,7 @@ use uuid::Uuid;
 
 use crate::{stack_string, PlsError, BASE_CG_PATH, BASE_PATH};
 
+#[derive(Debug)]
 pub enum JobStatus {
     Running,
     Exit(i32),
@@ -45,6 +52,7 @@ impl Default for JobStatus {
     }
 }
 
+#[derive(Debug)]
 pub struct Job {
     id: Uuid,
     cancel: Arc<Notify>,
@@ -70,6 +78,7 @@ impl Job {
     }
 }
 
+#[derive(Debug)]
 pub struct Controller<'c, J, IN> {
     client: &'c str,
     client_uid: i32,
@@ -78,14 +87,38 @@ pub struct Controller<'c, J, IN> {
     inotify: IN,
 }
 
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("Invalid client name")]
+    CStringError(#[from] NulError),
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
+    #[error("Failed to cast")]
+    Conversion(#[from] std::num::TryFromIntError),
+}
+
 impl<'c, IN> Controller<'c, Job, IN> {
-    // Resolve gid/pid;
-    // Create user for client if not exists
-    // Create cgroup at cg_base_path + client name
-    // PlsError Or specific Controller errors?
-    pub fn new(client: &'c str, inotify: IN) -> Result<Self, PlsError> {
-        let client_uid = 123;
-        let client_gid = 456;
+    fn ensure_uid_gid(client: &'c str) -> Result<(i32, i32), Error> {
+        let cstr = CString::new(client.as_bytes())?;
+        
+        // Safety: ptr is null checked, and if user does not exist, user is created;
+        let passwd = unsafe { getpwnam(cstr.as_ptr()) };
+        if passwd.is_null() {
+            useradd(client)?;
+            return Self::ensure_uid_gid(client)
+        } 
+
+        let (uid, gid) = unsafe {
+            let uid = i32::try_from((*passwd).pw_uid)?;
+            let gid = i32::try_from((*passwd).pw_gid)?;
+            (uid, gid)
+        };
+
+        Ok((uid, gid))
+    }
+
+    pub fn new(client: &'c str, inotify: IN) -> Result<Controller<'c, Job, IN>, Error> {
+        let (client_uid, client_gid) = Self::ensure_uid_gid(client)?;
         Ok(Self {
             client,
             client_uid,
@@ -104,7 +137,7 @@ impl<'c, IN> Controller<'c, Job, IN> {
     // cgroup::cpu_weight(&path, opts) -> Result
     // cgroup::mem_high() .. and so on;
     pub async fn start(&mut self, _job_req: ()) -> Result<Uuid, PlsError> {
-        let job = Job::new();
+        let job = Job::default();
         let job_id = job
             .id
             .to_simple()
