@@ -1,9 +1,18 @@
 use log::error;
 
-use nix::{
-    libc::{setgid, setuid},
-    unistd::getpid,
-};
+use nix::{unistd::getpid, libc::getpwnam};
+
+#[cfg(target_os = "linux")]
+use nix::libc::{setgid, setuid};
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) mod stub {
+    pub fn setgid(_: i32) -> i32 { 0 }
+    pub fn setuid(_: i32) -> i32 { 0 }
+}
+
+#[cfg(not(target_os = "linux"))]
+use stub::{setuid, setgid};
 
 use std::{
     collections::HashMap,
@@ -14,7 +23,7 @@ use std::{
 };
 
 use tokio::{
-    fs::File,
+    fs::{File, create_dir_all},
     io::{AsyncWriteExt, BufReader, BufWriter},
     process::Command,
     sync::Notify,
@@ -63,8 +72,8 @@ impl Job {
 
 pub struct Controller<'c, J, IN> {
     client: &'c str,
-    client_uid: u32,
-    client_gid: u32,
+    client_uid: i32,
+    client_gid: i32,
     jobs: HashMap<Uuid, J>,
     inotify: IN,
 }
@@ -72,7 +81,6 @@ pub struct Controller<'c, J, IN> {
 impl<'c, IN> Controller<'c, Job, IN> {
     // Resolve gid/pid;
     // Create user for client if not exists
-    // Create dir for jobs at base path + client name
     // Create cgroup at cg_base_path + client name
     // PlsError Or specific Controller errors?
     pub fn new(client: &'c str, inotify: IN) -> Result<Self, PlsError> {
@@ -88,6 +96,13 @@ impl<'c, IN> Controller<'c, Job, IN> {
     }
 
     // Create cgroup for job, "base path + client name + uuid", apply constraints if any
+    
+    // Cgroups stuff should be handled by static namespace
+    // file names should be constants on it;
+    // cgroup::enable(&path, ControllersMask) -> Result
+    // cgroup::disable(&path, ControllersMask) -> Result
+    // cgroup::cpu_weight(&path, opts) -> Result
+    // cgroup::mem_high() .. and so on;
     pub async fn start(&mut self, _job_req: ()) -> Result<Uuid, PlsError> {
         let job = Job::new();
         let job_id = job
@@ -97,11 +112,11 @@ impl<'c, IN> Controller<'c, Job, IN> {
             .to_owned();
 
         let job_dir = Path::new(BASE_PATH).join(self.client).join(&job_id);
-        tokio::fs::create_dir_all(&job_dir).await?;
+        create_dir_all(&job_dir).await?;
 
         // Enable controllers after creating
         let cgroup_path = Path::new(BASE_CG_PATH).join(self.client).join(&job_id);
-        tokio::fs::create_dir_all(&cgroup_path).await?;
+        create_dir_all(&cgroup_path).await?;
 
         let cgroup_procs: stack_string::String<256> = cgroup_path
             .join("cgroup.procs")
@@ -116,10 +131,10 @@ impl<'c, IN> Controller<'c, Job, IN> {
         // actual command from job req
         let mut cmd = Command::new("node");
         // actual args from job req
-        cmd.args(&["index.js"])
+        cmd.args(&["/tmp/index.js", "30"])
             .current_dir(&job_dir)
             .stdout(Stdio::piped())
-            .stdin(Stdio::piped());
+            .stderr(Stdio::piped());
 
         // Safety:
         // All calls inside closure are async-signal-safe
@@ -148,6 +163,7 @@ impl<'c, IN> Controller<'c, Job, IN> {
             });
         }
 
+        // Move that to Job::run(cmd)?
         let mut child = cmd.spawn()?;
 
         // Unwrap: Command is instantiated within the scope of this function
