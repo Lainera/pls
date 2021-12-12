@@ -3,3 +3,9 @@ Notes.md
 /ubuntu/*/**
 
 !/ubuntu/Vagrantfile
+
+
+# Added by cargo
+
+/target
+Cargo.lock
