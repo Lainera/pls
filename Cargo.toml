@@ -14,3 +14,7 @@ tonic = { version = "~0.6", features = ["default", "tls", "tls-roots", "prost"] 
 
 [build-dependencies]
 tonic-build = { version = "~0.6", features = ["prost"]}
+
+[[bin]]
+name = "spawn"
+path = "src/bin/spawn.rs"

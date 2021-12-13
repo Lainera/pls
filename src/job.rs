@@ -5,7 +5,7 @@ use tokio::{sync::Notify, process::Command, io::{BufReader, BufWriter, AsyncWrit
 use uuid::Uuid;
 use thiserror::Error;
 
-use crate::{Empty, JobRequest, stack_string, cgroup::PROC_FILE};
+use crate::{Empty, runner::JobRequest, stack_string, cgroup::PROC_FILE};
 
 #[cfg(target_os = "linux")]
 use nix::libc::{setgid, setuid};
@@ -113,7 +113,6 @@ impl<P> Job<(Command, P, Empty, Empty)> {
             .to_str()
             .expect("Panic on valid utf8")
             .try_into()?;
-
 
         // Safety: all calls inside closure are async-signal-safe
         unsafe {

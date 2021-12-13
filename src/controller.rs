@@ -1,6 +1,6 @@
 use log::error;
 use thiserror::Error;
-use crate::JobRequest;
+use crate::runner::JobRequest;
 use crate::job::{Job, Started};
 
 #[cfg(target_os = "linux")]
@@ -9,7 +9,7 @@ use nix::libc::getpwnam;
 #[cfg(target_os = "linux")]
 // Synchronously adds user during setup phase to avoid
 // dealing with boxing of recursive future
-fn useradd(client: &'c str) -> Result<(), Error> {
+fn useradd<'c>(client: &'c str) -> Result<(), Error> {
     let args = vec!["-s", "/sbin/nologin", "-U", client];
     std::process::Command::new("useradd")
         .args(&args)

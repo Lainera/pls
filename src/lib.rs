@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-tonic::include_proto!("runner");
+pub mod runner {
+    tonic::include_proto!("runner");
+}
 
 use thiserror::Error;
 pub mod controller;
