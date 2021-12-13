@@ -251,5 +251,4 @@ impl<P> Job<(Command, P, Empty, Initialized)> {
             handle: (cmd, job_dir, Initialized, cgroup),
         }
     }
-
 }

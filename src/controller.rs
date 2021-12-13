@@ -34,6 +34,8 @@ use uuid::Uuid;
 use crate::{job, BASE_CG_PATH, BASE_PATH};
 
 
+// TODO: 
+// Add cleanup task which removes empty cgroups when Job exits
 #[derive(Debug)]
 pub struct Controller<'c, J, IN> {
     client: &'c str,
