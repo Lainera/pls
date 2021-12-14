@@ -1,7 +1,14 @@
+use crate::job::{Job, Started};
+use crate::runner::{JobRequest, LogMessage};
 use log::error;
 use thiserror::Error;
-use crate::runner::JobRequest;
-use crate::job::{Job, Started};
+use tokio::{
+    io::AsyncReadExt,
+    sync::{
+        mpsc::{self, Receiver},
+        watch,
+    },
+};
 
 #[cfg(target_os = "linux")]
 use nix::libc::getpwnam;
@@ -11,10 +18,8 @@ use nix::libc::getpwnam;
 // dealing with boxing of recursive future
 fn useradd<'c>(client: &'c str) -> Result<(), Error> {
     let args = vec!["-s", "/sbin/nologin", "-U", client];
-    std::process::Command::new("useradd")
-        .args(&args)
-        .status()?;
-    
+    std::process::Command::new("useradd").args(&args).status()?;
+
     Ok(())
 }
 
@@ -23,26 +28,36 @@ use crate::stub::{getpwnam, useradd};
 
 use std::{
     collections::HashMap,
-    path::Path,
     ffi::{CString, NulError},
+    path::Path,
 };
 
-use tokio::fs::create_dir_all;
+use tokio::fs::{create_dir_all, File};
 
 use uuid::Uuid;
 
 use crate::{job, BASE_CG_PATH, BASE_PATH};
 
+pub enum Fd {
+    Out,
+    Err,
+}
 
-// TODO: 
-// Add cleanup task which removes empty cgroups when Job exits
+impl From<Fd> for i32 {
+    fn from(fd: Fd) -> Self {
+        match fd {
+            Fd::Out => 0,
+            Fd::Err => 1,
+        }
+    }
+}
+
 #[derive(Debug)]
-pub struct Controller<'c, J, IN> {
+pub struct Controller<'c, J> {
     client: &'c str,
     client_uid: u32,
     client_gid: u32,
     jobs: HashMap<Uuid, J>,
-    inotify: IN,
 }
 
 #[derive(Debug, Error)]
@@ -55,45 +70,21 @@ pub enum Error {
     Conversion(#[from] std::num::TryFromIntError),
     #[error(transparent)]
     JobError(#[from] job::Error),
+    #[error("Failed to find job({0})")]
+    JobNotFound(Uuid),
 }
 
-impl<'c, IN> Controller<'c, Job<Started>, IN> {
-    fn ensure_uid_gid(client: &'c str) -> Result<(u32, u32), Error> {
-        let cstr = CString::new(client.as_bytes())?;
-        
-        // Safety: ptr is null checked, and if user does not exist, user is created;
-        let passwd = unsafe { getpwnam(cstr.as_ptr()) };
-        if passwd.is_null() {
-            useradd(client)?;
-            return Self::ensure_uid_gid(client)
-        } 
-
-        let (uid, gid) = unsafe {
-            ((*passwd).pw_uid, (*passwd).pw_gid)
-        };
-
-        Ok((uid, gid))
-    }
-
-    pub fn new(client: &'c str, inotify: IN) -> Result<Controller<'c, Job<Started>, IN>, Error> {
+impl<'c> Controller<'c, Job<Started>> {
+    pub fn new(client: &'c str) -> Result<Controller<'c, Job<Started>>, Error> {
         let (client_uid, client_gid) = Self::ensure_uid_gid(client)?;
         Ok(Self {
             client,
             client_uid,
             client_gid,
             jobs: HashMap::new(),
-            inotify,
         })
     }
 
-    // Create cgroup for job, "base path + client name + uuid", apply constraints if any
-    //
-    // Cgroups stuff should be handled by static namespace
-    // file names should be constants on it;
-    // cgroup::enable(&path, ControllersMask) -> Result
-    // cgroup::disable(&path, ControllersMask) -> Result
-    // cgroup::cpu_weight(&path, opts) -> Result
-    // cgroup::mem_high() .. and so on;
     pub async fn start(&mut self, job_request: JobRequest) -> Result<Uuid, Error> {
         let job = Job::default();
         let job_id = job
@@ -111,14 +102,126 @@ impl<'c, IN> Controller<'c, Job<Started>, IN> {
 
         let job = job
             .add_command(&job_request)
-            .add_to_cgroup(&cgroup_path)?
+            .add_to_cgroup(cgroup_path)?
             .set_ownership(self.client_uid, self.client_gid)
-            .set_job_dir(&job_dir)
+            .set_job_dir(job_dir)
             .spawn()?;
 
         let job_id: Uuid = job.id().to_owned();
         self.jobs.insert(job_id, job);
 
         Ok(job_id)
+    }
+
+    pub async fn output(
+        &mut self,
+        job_id: Uuid,
+    ) -> Result<Receiver<Result<LogMessage, Error>>, Error> {
+        let job = self.jobs.get(&job_id).ok_or(Error::JobNotFound(job_id))?;
+        let job_dir = job.job_dir();
+
+        let (tx, rx) = mpsc::channel(20);
+
+        if job.is_complete() {
+            Self::read_file(Fd::Out, job_dir, tx.clone()).await;
+            Self::read_file(Fd::Err, job_dir, tx).await;
+
+            Ok(rx)
+        } else {
+            let completion = job.subscribe();
+            Self::watch_file(Fd::Out, job_dir, completion.clone(), tx.clone()).await;
+            Self::watch_file(Fd::Err, job_dir, completion, tx).await;
+
+            Ok(rx)
+        }
+    }
+
+    async fn watch_file(
+        fd: Fd,
+        job_dir: &Path,
+        mut completion: watch::Receiver<bool>,
+        tx: mpsc::Sender<Result<LogMessage, Error>>,
+    ) {
+        let file_path = match fd {
+            Fd::Out => job_dir.join("out"),
+            Fd::Err => job_dir.join("err"),
+        };
+
+        tokio::spawn(async move {
+            let fd: i32 = fd.into();
+            let mut buf = [0u8; 512];
+            let mut file = File::open(file_path).await?;
+            let mut done = false;
+
+            loop {
+                tokio::select! {
+                    _ = completion.changed() => {
+                        // exit on next EOF;
+                        done = true;
+                    }
+                   outcome = file.read(&mut buf) => {
+                       match outcome {
+                           Ok(bytes_read) if bytes_read > 0 => {
+                               let msg = LogMessage { fd, output: buf[..bytes_read].to_vec() };
+                               if let Err(err) = tx.send(Ok(msg)).await {
+                                   error!("Failed to send read logs({})", err);
+                                   break;
+                               }
+                           }
+                           Ok(bytes_read) if bytes_read == 0 && done => break,
+                           Err(err) => {
+                               error!("Error reading from log file: {}", err);
+                               break;
+                           },
+                           _ => (),
+                       }
+                   }
+
+                }
+            }
+
+            Ok::<(), std::io::Error>(())
+        });
+    }
+
+    async fn read_file(fd: Fd, job_dir: &Path, tx: mpsc::Sender<Result<LogMessage, Error>>) {
+        let file_path = match fd {
+            Fd::Out => job_dir.join("out"),
+            Fd::Err => job_dir.join("err"),
+        };
+
+        tokio::spawn(async move {
+            let fd: i32 = fd.into();
+            let mut file = File::open(file_path).await?;
+            let mut buffer = [0u8; 512];
+
+            while let Ok(bytes_read) = file.read(&mut buffer).await {
+                let msg = LogMessage {
+                    fd,
+                    output: buffer[..bytes_read].to_vec(),
+                };
+                if let Err(err) = tx.send(Ok(msg)).await {
+                    error!("Failed to send output message: {}", err);
+                    break;
+                }
+            }
+
+            Ok::<(), std::io::Error>(())
+        });
+    }
+
+    fn ensure_uid_gid(client: &'c str) -> Result<(u32, u32), Error> {
+        let cstr = CString::new(client.as_bytes())?;
+
+        // Safety: ptr is null checked, and if user does not exist, user is created;
+        let passwd = unsafe { getpwnam(cstr.as_ptr()) };
+        if passwd.is_null() {
+            useradd(client)?;
+            return Self::ensure_uid_gid(client);
+        }
+
+        let (uid, gid) = unsafe { ((*passwd).pw_uid, (*passwd).pw_gid) };
+
+        Ok((uid, gid))
     }
 }

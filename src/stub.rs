@@ -1,9 +1,15 @@
 /// Used for stubbing libc functionality;
 use nix::libc::{c_char, passwd};
 
-pub fn setuid(_: u32) -> i32 { 0 }
-pub fn setgid(_: u32) -> i32 { 0 }
-pub fn useradd(_: &str) -> Result<(), crate::controller::Error> { Ok(()) }
+pub fn setuid(_: u32) -> i32 {
+    0
+}
+pub fn setgid(_: u32) -> i32 {
+    0
+}
+pub fn useradd(_: &str) -> Result<(), crate::controller::Error> {
+    Ok(())
+}
 
 pub unsafe fn getpwnam(_: *const c_char) -> *mut passwd {
     let empty = std::ptr::null::<i8>() as *mut i8;
@@ -22,4 +28,3 @@ pub unsafe fn getpwnam(_: *const c_char) -> *mut passwd {
 
     &pwd as *const _ as *mut _
 }
-

@@ -6,8 +6,8 @@ pub mod runner {
 
 use thiserror::Error;
 pub mod controller;
-pub mod stack_string;
 pub mod job;
+pub mod stack_string;
 
 pub mod cgroup {
     pub const PROC_FILE: &str = "cgroup.procs";
@@ -39,7 +39,7 @@ mod service {
 
     use crate::controller::Controller;
 
-    pub struct Service<'c, J, IN> {
-        controllers: HashMap<&'c str, &'c Controller<'c, J, IN>>,
+    pub struct Service<'c, J> {
+        controllers: HashMap<&'c str, &'c Controller<'c, J>>,
     }
 }

@@ -1,17 +1,27 @@
-use std::{sync::{Arc, RwLock}, process::Stdio, path::Path, os::unix::prelude::ExitStatusExt};
 use log::error;
 use nix::unistd::getpid;
-use tokio::{sync::Notify, process::Command, io::{BufReader, BufWriter, AsyncWriteExt}, fs::File};
-use uuid::Uuid;
+use std::{
+    os::unix::prelude::ExitStatusExt,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, RwLock},
+};
 use thiserror::Error;
+use tokio::{
+    fs::File,
+    io::{AsyncWriteExt, BufReader},
+    process::Command,
+    sync::{watch, Notify},
+};
+use uuid::Uuid;
 
-use crate::{Empty, runner::JobRequest, stack_string, cgroup::PROC_FILE};
+use crate::{cgroup::PROC_FILE, runner::JobRequest, stack_string, Empty};
 
 #[cfg(target_os = "linux")]
 use nix::libc::{setgid, setuid};
 
 #[cfg(not(target_os = "linux"))]
-use crate::stub::{setuid, setgid};
+use crate::stub::{setgid, setuid};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -35,15 +45,20 @@ impl Default for JobStatus {
 }
 
 #[derive(Debug)]
-pub struct Job<H> {
+pub struct Job<S> {
     id: Uuid,
     cancel: Arc<Notify>,
     status: Arc<RwLock<JobStatus>>,
-    handle: H,
+    state: S,
 }
 
 #[derive(Debug)]
-pub struct Started;
+pub struct Started {
+    cgroup_dir: PathBuf,
+    job_dir: PathBuf,
+    completion: watch::Receiver<bool>,
+}
+
 pub struct Initialized;
 
 impl Default for Job<Empty> {
@@ -51,7 +66,35 @@ impl Default for Job<Empty> {
         let id = Uuid::new_v4();
         let cancel = Arc::new(Notify::new());
         let status = Arc::new(RwLock::new(JobStatus::default()));
-        Self { id, cancel, status, handle: Empty }
+        Self {
+            id,
+            cancel,
+            status,
+            state: Empty,
+        }
+    }
+}
+impl Job<Started> {
+    pub fn job_dir(&self) -> &Path {
+        &self.state.job_dir
+    }
+
+    pub fn cgroup_dir(&self) -> &Path {
+        &self.state.cgroup_dir
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.state.completion.clone()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        // regular read on RwLock blocks the thread
+        match self.status.try_read() {
+            Ok(status) => !matches!(*status, JobStatus::Running),
+            // Either lock is poisoned (writer would not be able to continue)
+            // Or WouldBlock (writer updates the status to complete and would not continue)
+            Err(_) => true,
+        }
     }
 }
 
@@ -64,10 +107,7 @@ impl<T> Job<T> {
 impl Job<Empty> {
     pub fn add_command(self, job_request: &JobRequest) -> Job<(Command, Empty, Empty, Empty)> {
         let Self {
-            id,
-            cancel,
-            status,
-            ..
+            id, cancel, status, ..
         } = self;
 
         let mut handle = Command::new(&job_request.executable);
@@ -76,34 +116,48 @@ impl Job<Empty> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-
         Job {
             id,
             cancel,
             status,
-            handle: (handle, Empty, Empty, Empty),
+            state: (handle, Empty, Empty, Empty),
         }
     }
 }
 
 impl<P, O, C> Job<(Command, P, O, C)> {
-    pub fn set_job_dir(self, job_dir: &Path) -> Job<(Command, &Path, O, C)> {
-        let Self { id, cancel, status, handle, ..}: Job<(Command, P, O, C)> = self;
-        let (mut cmd, _, ownership, cgroup) = handle;
+    pub fn set_job_dir(self, job_dir: PathBuf) -> Job<(Command, PathBuf, O, C)> {
+        let Self {
+            id,
+            cancel,
+            status,
+            state,
+            ..
+        }: Job<(Command, P, O, C)> = self;
+        let (mut cmd, _, ownership, cgroup) = state;
         cmd.current_dir(&job_dir);
         Job {
             id,
             cancel,
             status,
-            handle: (cmd, job_dir, ownership, cgroup),
+            state: (cmd, job_dir, ownership, cgroup),
         }
     }
 }
 
 impl<P> Job<(Command, P, Empty, Empty)> {
-    pub fn add_to_cgroup(self, cgroup_path: &Path) -> Result<Job<(Command, P, Empty, Initialized)>, Error> {
-        let Self { id, cancel, status, handle, ..} = self;
-        let (mut cmd, job_dir, _, _) = handle;
+    pub fn add_to_cgroup(
+        self,
+        cgroup_path: PathBuf,
+    ) -> Result<Job<(Command, P, Empty, PathBuf)>, Error> {
+        let Self {
+            id,
+            cancel,
+            status,
+            state,
+            ..
+        } = self;
+        let (mut cmd, job_dir, _, _) = state;
         let cgroup_procs: stack_string::String<256> = cgroup_path
             .join(PROC_FILE)
             // BASE_PATH is &str,
@@ -127,19 +181,25 @@ impl<P> Job<(Command, P, Empty, Empty)> {
             id,
             cancel,
             status,
-            handle: (cmd, job_dir, Empty, Initialized),
+            state: (cmd, job_dir, Empty, cgroup_path),
         })
     }
 }
 
-impl Job<(Command, &Path, Initialized, Initialized)> {
+impl Job<(Command, PathBuf, Initialized, PathBuf)> {
     pub fn spawn(self) -> Result<Job<Started>, Error> {
-        let Self { id, cancel, status, handle, ..} = self;
-        let (mut cmd, job_dir, ..) = handle;
-        
+        let Self {
+            id,
+            cancel,
+            status,
+            state,
+            ..
+        } = self;
+        let (mut cmd, job_dir, _, cgroup_dir, ..) = state;
+
         let mut child = cmd.spawn()?;
 
-        // Unwrap: Command is instantiated by Job and is a private field 
+        // Unwrap: Command is instantiated by Job and is a private field
         // therefore out/error must be present
         let out = child.stdout.take().expect("Child stdout is missing");
         let err = child.stderr.take().expect("Child stderr is missing");
@@ -153,11 +213,11 @@ impl Job<(Command, &Path, Initialized, Initialized)> {
         let outfile = job_dir.join("out");
         let errfile = job_dir.join("err");
 
+        let (tx, rx) = watch::channel(false);
+
         tokio::spawn(async move {
-            let wout = File::create(outfile).await?;
-            let werr = File::create(errfile).await?;
-            let mut wout = BufWriter::new(wout);
-            let mut werr = BufWriter::new(werr);
+            let mut wout = File::create(outfile).await?;
+            let mut werr = File::create(errfile).await?;
 
             loop {
                 tokio::select! {
@@ -199,8 +259,13 @@ impl Job<(Command, &Path, Initialized, Initialized)> {
                             },
 
                             Err(outcome) => {
+                                let exit_code = outcome.raw_os_error().unwrap_or_else(|| {
+                                    error!("No exit code on child process failure: {}", outcome);
+                                    -1
+                                });
+
                                 let mut status = status_clone.write().unwrap();
-                                *status = JobStatus::Exit(outcome.raw_os_error().unwrap());
+                                *status = JobStatus::Exit(exit_code);
                             },
                         }
 
@@ -209,24 +274,40 @@ impl Job<(Command, &Path, Initialized, Initialized)> {
                 }
             }
 
+            if let Err(err) = tx.send(true) {
+                error!(
+                    "Failed to notify about job completion: {}, for job({})",
+                    err, id
+                );
+            }
+
             Ok::<(), std::io::Error>(())
         });
-
 
         Ok(Job {
             id,
             cancel,
             status,
-            handle: Started,
+            state: Started {
+                cgroup_dir,
+                job_dir,
+                completion: rx,
+            },
         })
     }
 }
 
-impl<P> Job<(Command, P, Empty, Initialized)> {
-    pub fn set_ownership(self, uid: u32, gid: u32) -> Job<(Command, P, Initialized, Initialized)> {
-        let Self { id, cancel, status, handle, ..} = self;
-        let (mut cmd, job_dir, _, cgroup) = handle;
-        
+impl<P> Job<(Command, P, Empty, PathBuf)> {
+    pub fn set_ownership(self, uid: u32, gid: u32) -> Job<(Command, P, Initialized, PathBuf)> {
+        let Self {
+            id,
+            cancel,
+            status,
+            state,
+            ..
+        } = self;
+        let (mut cmd, job_dir, _, cgroup) = state;
+
         // Safety: all calls are async-signal-safe;
         unsafe {
             cmd.pre_exec(move || {
@@ -248,7 +329,7 @@ impl<P> Job<(Command, P, Empty, Initialized)> {
             id,
             cancel,
             status,
-            handle: (cmd, job_dir, Initialized, cgroup),
+            state: (cmd, job_dir, Initialized, cgroup),
         }
     }
 }
