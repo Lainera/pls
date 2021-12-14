@@ -4,7 +4,7 @@ use std::{
     os::unix::prelude::ExitStatusExt,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard},
 };
 use thiserror::Error;
 use tokio::{
@@ -15,7 +15,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{cgroup::PROC_FILE, runner::JobRequest, stack_string, Empty};
+use crate::{cgroup::PROC_FILE, runner::{JobRequest, self, job_status::Outcome}, stack_string, Empty};
 
 #[cfg(target_os = "linux")]
 use nix::libc::{setgid, setuid};
@@ -36,6 +36,16 @@ pub enum JobStatus {
     Running,
     Exit(i32),
     Signal(i32),
+}
+
+impl<'a> From<RwLockReadGuard<'a, JobStatus>> for runner::JobStatus {
+    fn from(value: RwLockReadGuard<'a, JobStatus>) -> Self {
+        match *value {
+            JobStatus::Running => runner::JobStatus { outcome: None },
+            JobStatus::Exit(code) => runner::JobStatus { outcome: Some(Outcome::ExitCode(code)) },
+            JobStatus::Signal(signal) => runner::JobStatus { outcome: Some(Outcome::Signal(signal)) } ,
+        }
+    }
 }
 
 impl Default for JobStatus {
@@ -87,8 +97,27 @@ impl Job<Started> {
         self.state.completion.clone()
     }
 
+    pub fn cancel(&self) {
+        self.cancel.notify_one()
+    }
+
+    pub fn status(&self) -> runner::JobStatus {
+        if !self.is_complete() {
+            runner::JobStatus {
+                outcome: None,
+            }
+        } else {
+            match self.status.read() {
+                Ok(status) => status.into(),
+                Err(err) => {
+                    error!("Failed to read job status: {}", err);
+                    runner::JobStatus {outcome: None}
+                },
+            }
+        }
+    }
+
     pub fn is_complete(&self) -> bool {
-        // regular read on RwLock blocks the thread
         match self.status.try_read() {
             Ok(status) => !matches!(*status, JobStatus::Running),
             // Either lock is poisoned (writer would not be able to continue)

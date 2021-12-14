@@ -1,5 +1,5 @@
-use crate::job::{Job, Started};
-use crate::runner::{JobRequest, LogMessage};
+use crate::job::{Job, Started, JobStatus};
+use crate::runner::{JobRequest, LogMessage, self};
 use log::error;
 use thiserror::Error;
 use tokio::{
@@ -113,8 +113,21 @@ impl<'c> Controller<'c, Job<Started>> {
         Ok(job_id)
     }
 
+    pub async fn status(&self, job_id: Uuid) -> Result<runner::JobStatus, Error> {
+        let job = self.jobs.get(&job_id).ok_or(Error::JobNotFound(job_id))?;
+        Ok(job.status())
+    }
+
+    pub async fn stop(&mut self, job_id: Uuid) -> runner::Ack {
+        if let Some(job) = self.jobs.get(&job_id) {
+            job.cancel();
+        }
+
+        runner::Ack {}
+    }
+
     pub async fn output(
-        &mut self,
+        &self,
         job_id: Uuid,
     ) -> Result<Receiver<Result<LogMessage, Error>>, Error> {
         let job = self.jobs.get(&job_id).ok_or(Error::JobNotFound(job_id))?;
