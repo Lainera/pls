@@ -1,5 +1,5 @@
 use crate::job::{Job, Started};
-use crate::runner::{JobRequest, LogMessage, self};
+use crate::runner::{self, JobRequest, LogMessage};
 use log::error;
 use thiserror::Error;
 use tokio::{
@@ -30,7 +30,7 @@ use tokio::fs::{create_dir_all, File};
 
 use uuid::Uuid;
 
-use crate::{job, BASE_CG_PATH, BASE_PATH, cgroup};
+use crate::{cgroup, job, BASE_CG_PATH, BASE_PATH};
 
 pub enum Fd {
     Out,
@@ -128,10 +128,7 @@ impl<'c> Controller<'c, Job<Started>> {
         runner::Ack {}
     }
 
-    pub async fn output(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Receiver<Result<LogMessage, Error>>, Error> {
+    pub async fn output(&self, job_id: Uuid) -> Result<Receiver<Result<LogMessage, Error>>, Error> {
         let job = self.jobs.get(&job_id).ok_or(Error::JobNotFound(job_id))?;
         let job_dir = job.job_dir();
 

@@ -15,7 +15,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{cgroup::PROC_FILE, runner::{JobRequest, self, job_status::Outcome}, stack_string, Empty};
+use crate::{
+    cgroup::PROC_FILE,
+    runner::{self, job_status::Outcome, JobRequest},
+    stack_string, Empty,
+};
 use nix::libc::{setgid, setuid};
 
 #[derive(Debug, Error)]
@@ -37,8 +41,12 @@ impl<'a> From<RwLockReadGuard<'a, JobStatus>> for runner::JobStatus {
     fn from(value: RwLockReadGuard<'a, JobStatus>) -> Self {
         match *value {
             JobStatus::Running => runner::JobStatus { outcome: None },
-            JobStatus::Exit(code) => runner::JobStatus { outcome: Some(Outcome::ExitCode(code)) },
-            JobStatus::Signal(signal) => runner::JobStatus { outcome: Some(Outcome::Signal(signal)) } ,
+            JobStatus::Exit(code) => runner::JobStatus {
+                outcome: Some(Outcome::ExitCode(code)),
+            },
+            JobStatus::Signal(signal) => runner::JobStatus {
+                outcome: Some(Outcome::Signal(signal)),
+            },
         }
     }
 }
@@ -98,16 +106,14 @@ impl Job<Started> {
 
     pub fn status(&self) -> runner::JobStatus {
         if !self.is_complete() {
-            runner::JobStatus {
-                outcome: None,
-            }
+            runner::JobStatus { outcome: None }
         } else {
             match self.status.read() {
                 Ok(status) => status.into(),
                 Err(err) => {
                     error!("Failed to read job status: {}", err);
-                    runner::JobStatus {outcome: None}
-                },
+                    runner::JobStatus { outcome: None }
+                }
             }
         }
     }

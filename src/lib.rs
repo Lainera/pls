@@ -5,10 +5,10 @@ pub mod runner {
 }
 
 use thiserror::Error;
+pub mod cgroup;
 pub mod controller;
 pub mod job;
 pub mod stack_string;
-pub mod cgroup;
 
 #[derive(Error, Debug)]
 pub enum PlsError {
