@@ -1,4 +1,4 @@
-use crate::job::{Job, Started, JobStatus};
+use crate::job::{Job, Started};
 use crate::runner::{JobRequest, LogMessage, self};
 use log::error;
 use thiserror::Error;
@@ -36,7 +36,7 @@ use tokio::fs::{create_dir_all, File};
 
 use uuid::Uuid;
 
-use crate::{job, BASE_CG_PATH, BASE_PATH};
+use crate::{job, BASE_CG_PATH, BASE_PATH, cgroup};
 
 pub enum Fd {
     Out,
@@ -72,11 +72,17 @@ pub enum Error {
     JobError(#[from] job::Error),
     #[error("Failed to find job({0})")]
     JobNotFound(Uuid),
+    #[error(transparent)]
+    Cgroup(#[from] cgroup::Error),
 }
 
 impl<'c> Controller<'c, Job<Started>> {
-    pub fn new(client: &'c str) -> Result<Controller<'c, Job<Started>>, Error> {
+    pub async fn new(client: &'c str) -> Result<Controller<'c, Job<Started>>, Error> {
         let (client_uid, client_gid) = Self::ensure_uid_gid(client)?;
+        let cgroup_dir = Path::new(BASE_CG_PATH).join(client);
+        create_dir_all(&cgroup_dir).await?;
+        cgroup::enable_subtree(&cgroup_dir, cgroup::Controller::all()).await?;
+
         Ok(Self {
             client,
             client_uid,
@@ -96,13 +102,15 @@ impl<'c> Controller<'c, Job<Started>> {
         let job_dir = Path::new(BASE_PATH).join(self.client).join(&job_id);
         create_dir_all(&job_dir).await?;
 
-        // Enable controllers after creating
-        let cgroup_path = Path::new(BASE_CG_PATH).join(self.client).join(&job_id);
-        create_dir_all(&cgroup_path).await?;
+        let cgroup_dir = Path::new(BASE_CG_PATH).join(self.client).join(&job_id);
+        create_dir_all(&cgroup_dir).await?;
+        cgroup::set_cpu_control(&cgroup_dir, &job_request).await?;
+        cgroup::set_mem_control(&cgroup_dir, &job_request).await?;
+        cgroup::set_io_control(&cgroup_dir, &job_request).await?;
 
         let job = job
             .add_command(&job_request)
-            .add_to_cgroup(cgroup_path)?
+            .add_to_cgroup(cgroup_dir)?
             .set_ownership(self.client_uid, self.client_gid)
             .set_job_dir(job_dir)
             .spawn()?;

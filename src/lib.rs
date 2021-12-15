@@ -8,10 +8,7 @@ use thiserror::Error;
 pub mod controller;
 pub mod job;
 pub mod stack_string;
-
-pub mod cgroup {
-    pub const PROC_FILE: &str = "cgroup.procs";
-}
+pub mod cgroup;
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod stub;

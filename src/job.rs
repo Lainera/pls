@@ -16,7 +16,6 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{cgroup::PROC_FILE, runner::{JobRequest, self, job_status::Outcome}, stack_string, Empty};
-
 #[cfg(target_os = "linux")]
 use nix::libc::{setgid, setuid};
 
@@ -225,7 +224,6 @@ impl Job<(Command, PathBuf, Initialized, PathBuf)> {
             ..
         } = self;
         let (mut cmd, job_dir, _, cgroup_dir, ..) = state;
-
         let mut child = cmd.spawn()?;
 
         // Unwrap: Command is instantiated by Job and is a private field
