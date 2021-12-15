@@ -16,11 +16,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{cgroup::PROC_FILE, runner::{JobRequest, self, job_status::Outcome}, stack_string, Empty};
-#[cfg(target_os = "linux")]
 use nix::libc::{setgid, setuid};
-
-#[cfg(not(target_os = "linux"))]
-use crate::stub::{setgid, setuid};
 
 #[derive(Debug, Error)]
 pub enum Error {

@@ -10,10 +10,7 @@ use tokio::{
     },
 };
 
-#[cfg(target_os = "linux")]
 use nix::libc::getpwnam;
-
-#[cfg(target_os = "linux")]
 // Synchronously adds user during setup phase to avoid
 // dealing with boxing of recursive future
 fn useradd<'c>(client: &'c str) -> Result<(), Error> {
@@ -22,9 +19,6 @@ fn useradd<'c>(client: &'c str) -> Result<(), Error> {
 
     Ok(())
 }
-
-#[cfg(not(target_os = "linux"))]
-use crate::stub::{getpwnam, useradd};
 
 use std::{
     collections::HashMap,

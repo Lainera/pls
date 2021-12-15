@@ -10,9 +10,6 @@ pub mod job;
 pub mod stack_string;
 pub mod cgroup;
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) mod stub;
-
 #[derive(Error, Debug)]
 pub enum PlsError {
     #[error(transparent)]
@@ -25,11 +22,7 @@ pub enum PlsError {
 pub struct Empty;
 
 const BASE_PATH: &str = "/tmp/pls/clients";
-#[cfg(target_os = "linux")]
 const BASE_CG_PATH: &str = "/sys/fs/cgroup";
-
-#[cfg(not(target_os = "linux"))]
-const BASE_CG_PATH: &str = "/tmp/fs/cgroup";
 
 mod service {
     use std::collections::HashMap;
