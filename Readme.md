@@ -133,8 +133,11 @@ message JobRequest {
   }
 
   message IoControl {
-    uint64 rbps_max = 1;
-    uint64 wbps_max = 2;
+    uint32 major = 1;
+    uint32 minor = 2;
+
+    uint64 rbps_max = 3;
+    uint64 wbps_max = 4;
   }
 
   string executable = 1;
@@ -146,7 +149,6 @@ message JobRequest {
 
 message Ack {}
 
-// jobid is byte representation of uuid 
 message JobId { bytes jobid = 1; }
 
 message JobStatus {
