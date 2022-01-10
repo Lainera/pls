@@ -1,0 +1,20 @@
+[package]
+name = "pls"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+uuid = { version = "~0.8", features = ["v4"]}
+tokio = { version = "~1.14", features = ["full"]}
+nix = "~0.23"
+thiserror = "~1.0"
+log = "~0.4"
+prost = "~0.9"
+tonic = { version = "~0.6", features = ["default", "tls", "tls-roots", "prost"] }
+
+[build-dependencies]
+tonic-build = { version = "~0.6", features = ["prost"]}
+
+[[bin]]
+name = "spawn"
+path = "src/bin/spawn.rs"

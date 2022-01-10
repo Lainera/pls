@@ -1,5 +1,14 @@
 */**/.vagrant
 Notes.md
 /ubuntu/*/**
+/out/*/**
+/out/*
+/ubuntu/*
 
 !/ubuntu/Vagrantfile
+
+
+# Added by cargo
+
+/target
+Cargo.lock
